@@ -1,13 +1,62 @@
-/* RegistrationPortal.jsx — updated for your requested features
-   Copy this into src/RegistrationPortal.jsx (replace the previous component).
-   It expects a runtime env: GOOGLE_SCRIPT_URL (Vite: import.meta.env.VITE_GOOGLE_SCRIPT_URL
-   or runtime window.__ENV setting). */
-
+// src/RegistrationPortal.jsx
 import React, { useState } from 'react';
 
+/*
+  Fixed runtime env detection (avoid direct import/import.meta checks).
+  This file expects runtime config via:
+    - window.__ENV or globalThis.__ENV (recommended)
+    - <script id="env-config"> JSON block in index.html
+    - globalThis.VITE_GOOGLE_SCRIPT_URL (optional)
+    - process.env.VITE_GOOGLE_SCRIPT_URL (build-time)
+  Fallback: '/api/proxy'
+*/
+
+// Safe runtime env getter (no direct import.meta usage)
+function getRuntimeEnvVar(name) {
+  try {
+    // 1) window.__ENV or globalThis.__ENV
+    if (typeof globalThis !== 'undefined' && globalThis.__ENV && globalThis.__ENV[name]) {
+      return globalThis.__ENV[name];
+    }
+
+    // 2) <script id="env-config" type="application/json">{...}</script>
+    if (typeof document !== 'undefined') {
+      const el = document.getElementById('env-config');
+      if (el && el.textContent) {
+        try {
+          const parsed = JSON.parse(el.textContent);
+          if (parsed && parsed[name]) return parsed[name];
+        } catch (err) {
+          // ignore parse errors
+        }
+      }
+    }
+
+    // 3) simple global variable injected by host (globalThis.VITE_GOOGLE_SCRIPT_URL)
+    if (typeof globalThis !== 'undefined' && globalThis[name]) return globalThis[name];
+
+    // 4) process.env (useful in Node/build-time environments)
+    if (typeof process !== 'undefined' && process.env) {
+      if (process.env[name]) return process.env[name];
+      // also check common React prefix if present
+      const alt = name.replace(/^VITE_/, 'REACT_APP_');
+      if (process.env[alt]) return process.env[alt];
+    }
+  } catch (err) {
+    // swallow
+  }
+  return undefined;
+}
+
+const GOOGLE_SCRIPT_URL =
+  getRuntimeEnvVar('VITE_GOOGLE_SCRIPT_URL') ||
+  getRuntimeEnvVar('REACT_APP_GOOGLE_SCRIPT_URL') ||
+  '/api/proxy'; // fallback to proxy relative path
+
+// Constants and lists
 const TEAM_COUNT = 13;
-const MAX_PARTICIPANTS_PER_TEAM = 80; // new team max
-const MAX_SPORTS_PER_PARTICIPANT = 3; // uniform for all
+const MAX_PARTICIPANTS_PER_TEAM = 80;
+const MAX_SPORTS_PER_PARTICIPANT = 3;
 const SPORTS = [
   '100 m','200 m','400 m','800 m','1500 m','5000 m','4x100 m relay',
   'Long Jump','High Jump','Triple Jump','Discuss Throw','Shotput','Javelin throw',
@@ -17,7 +66,6 @@ const SPORTS = [
   'Badminton (Singles)','Badminton (Doubles)','Badminton (Mixed Doubles)',
   'Volleyball (Men)','Kabaddi (Men)','Basketball (Men)','Tug of War','Football','Lawn Tennis','Quiz'
 ];
-
 const DESIGNATIONS = [
   'CCF and above',
   'CF',
@@ -27,7 +75,6 @@ const DESIGNATIONS = [
   'Ministerial Staff',
   'Others'
 ];
-
 const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
 const TEAM_CREDENTIALS = Array.from({ length: TEAM_COUNT }, (_, i) => ({ username: `manager_team${i+1}`, password: `Cham@Team${i+1}` }));
@@ -36,10 +83,6 @@ const ADMIN_CREDENTIALS = [
   { username: 'admin2', password: 'Chamba@Admin2' },
   { username: 'admin3', password: 'Chamba@Admin3' }
 ];
-
-const GOOGLE_SCRIPT_URL = (typeof window !== 'undefined' && (window.__ENV && window.__ENV.VITE_GOOGLE_SCRIPT_URL)) ? window.__ENV.VITE_GOOGLE_SCRIPT_URL
-  : (typeof import !== 'undefined' && import.meta && import.meta.env && import.meta.env.VITE_GOOGLE_SCRIPT_URL) ? import.meta.env.VITE_GOOGLE_SCRIPT_URL
-  : '/api/proxy'; // fallback to proxy relative path
 
 function computeAgeClass(gender, age) {
   const g = (gender || '').toLowerCase();
@@ -57,6 +100,7 @@ function computeAgeClass(gender, age) {
 }
 
 export default function RegistrationPortal() {
+  // state
   const [team, setTeam] = useState(1);
   const [participants, setParticipants] = useState([]);
   const [slotsToCreate, setSlotsToCreate] = useState(10);
@@ -74,32 +118,29 @@ export default function RegistrationPortal() {
 
   function setMsg(type, text) { setMessage({ type, text }); setTimeout(()=>setMessage(null), 8000); }
 
-  // helper - fetch all rows (for counts / admin)
+  // fetch helpers
   async function fetchAllRaw() {
     const res = await fetch(`${GOOGLE_SCRIPT_URL}?action=export`, { method: 'GET', mode: 'cors' });
-    const txt = await res.text();
-    if (!res.ok) throw new Error(`Export failed ${res.status}: ${txt}`);
-    try { return JSON.parse(txt); } catch(e) { throw new Error('Invalid JSON from export'); }
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Export failed ${res.status}: ${text}`);
+    try { return JSON.parse(text); } catch(e) { throw new Error('Invalid JSON from export'); }
   }
 
-  // get current team count
   async function getTeamCount(tnum) {
-    // Use export and count rows, or apps script action=count (if implemented)
     try {
       const data = await fetchAllRaw();
       const cnt = data.filter(r => String(r.teamNumber || r.team || '').includes(String(tnum))).length;
       return cnt;
-    } catch (err) {
-      console.error('getTeamCount error', err);
+    } catch(err) {
+      console.error('getTeamCount', err);
       throw err;
     }
   }
 
-  // Create slots after checking team limit
+  // create slots (ensures not exceeding team max)
   async function createSlots(n) {
     if (!isLoggedIn || isAdmin) { setMsg('error','Only logged-in team managers can create slots.'); return; }
     if (loggedTeam !== team) { setMsg('error', `You are logged in as Team ${loggedTeam}. Switch to Team ${team} to add slots.`); return; }
-
     const want = Math.max(0, Math.min(Number(n) || 0, MAX_PARTICIPANTS_PER_TEAM));
     try {
       const current = await getTeamCount(team);
@@ -112,16 +153,14 @@ export default function RegistrationPortal() {
       }));
       setParticipants(prev => [...prev, ...slots]);
       setMsg('info', `Created ${want} slots. Team now can submit these players.`);
-
-    } catch (err) {
+    } catch(err) {
       setMsg('error', 'Unable to check team count: ' + err.message);
     }
   }
 
   function updateParticipant(i, field, value) {
-    setParticipants(prev => prev.map((r, idx) => idx===i ? { ...r, [field]: value } : r));
+    setParticipants(prev => prev.map((r, idx) => idx === i ? { ...r, [field]: value } : r));
   }
-
   function updateSport(i, si, value) {
     setParticipants(prev => prev.map((r, idx) => {
       if (idx !== i) return r;
@@ -131,35 +170,33 @@ export default function RegistrationPortal() {
     }));
   }
 
-  // handle file input -> convert to base64
   function handlePhotoFile(i, file) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const base64 = ev.target.result.split(',')[1]; // remove data:...;base64,
-      setParticipants(prev => prev.map((r, idx) => idx===i ? { ...r, photoFile: file, photoBase64: base64, photoName: file.name } : r));
+      const base64 = ev.target.result.split(',')[1];
+      setParticipants(prev => prev.map((r, idx) => idx === i ? { ...r, photoFile: file, photoBase64: base64, photoName: file.name } : r));
     };
     reader.readAsDataURL(file);
   }
 
-  // Basic validation
   function validateAll() {
-    if (!isLoggedIn || isAdmin) { setMsg('error','Only logged-in managers can submit.'); return false; }
-    if (loggedTeam !== team) { setMsg('error', `You are manager for Team ${loggedTeam}. Switch to Team ${team}.`); return false; }
-    if (!participants || participants.length === 0) { setMsg('error','No participant slots created.'); return false; }
+    if (!isLoggedIn) { setMsg('error','Only logged-in managers can submit.'); return false; }
+    if (isAdmin) { setMsg('error','Admins cannot submit team participants.'); return false; }
+    if (loggedTeam !== team) { setMsg('error', `Logged in for Team ${loggedTeam}. Switch to Team ${team}.`); return false; }
+    if (!participants || participants.length === 0) { setMsg('error','No slots created.'); return false; }
     for (let i=0;i<participants.length;i++){
       const p = participants[i];
       if (!p.name || !p.name.trim()) { setMsg('error', `Participant ${i+1}: name required.`); return false; }
-      if (!p.age || isNaN(Number(p.age)) || Number(p.age)<=0) { setMsg('error', `Participant ${i+1}: valid age required.`); return false; }
-      if (!p.phone || !/^[0-9]{6,15}$/.test((p.phone||'').trim())) { setMsg('error', `Participant ${i+1}: enter valid phone.`); return false; }
-      const sel = (Array.isArray(p.sports)? p.sports.filter(Boolean).slice(0,MAX_SPORTS_PER_PARTICIPANT) : []);
+      if (!p.age || isNaN(Number(p.age)) || Number(p.age) <= 0) { setMsg('error', `Participant ${i+1}: valid age required.`); return false; }
+      if (!p.phone || !/^[0-9]{6,15}$/.test((p.phone||'').trim())) { setMsg('error', `Participant ${i+1}: valid phone required (6-15 digits).`); return false; }
+      const sel = (Array.isArray(p.sports) ? p.sports.filter(Boolean).slice(0,MAX_SPORTS_PER_PARTICIPANT) : []);
       if (sel.length === 0) { setMsg('error', `Participant ${i+1}: select at least 1 sport.`); return false; }
       if (sel.length > MAX_SPORTS_PER_PARTICIPANT) { setMsg('error', `Participant ${i+1}: max ${MAX_SPORTS_PER_PARTICIPANT} sports allowed.`); return false; }
       const uniq = Array.from(new Set(sel));
       if (uniq.length !== sel.length) { setMsg('error', `Participant ${i+1}: duplicate sports selected.`); return false; }
       if (!p.bloodType || !BLOOD_TYPES.includes(p.bloodType)) { setMsg('error', `Participant ${i+1}: select blood type.`); return false; }
       if (!p.designation || !DESIGNATIONS.includes(p.designation)) { setMsg('error', `Participant ${i+1}: select designation.`); return false; }
-      // compute age class
       p.ageClass = computeAgeClass(p.gender, p.age);
     }
     return true;
@@ -171,18 +208,15 @@ export default function RegistrationPortal() {
     if (!validateAll()) return;
     setLoading(true);
 
-    // check team count again (to avoid race)
     try {
       const current = await getTeamCount(team);
       if (current + participants.length > MAX_PARTICIPANTS_PER_TEAM) {
         setMsg('error', `Submitting ${participants.length} would exceed team limit. Team currently has ${current} players. Max ${MAX_PARTICIPANTS_PER_TEAM}.`);
-        setLoading(false);
-        return;
+        setLoading(false); return;
       }
     } catch (err) {
       setMsg('error', 'Unable to verify current team count before submit: ' + err.message);
-      setLoading(false);
-      return;
+      setLoading(false); return;
     }
 
     const payload = {
@@ -200,41 +234,30 @@ export default function RegistrationPortal() {
         sports: (Array.isArray(p.sports) ? p.sports.filter(Boolean).slice(0,MAX_SPORTS_PER_PARTICIPANT) : []),
         diet: p.diet || 'Veg',
         bloodType: p.bloodType || '',
-        photoBase64: p.photoBase64 || '', // base64 string (no data: prefix)
+        photoBase64: p.photoBase64 || '',
         photoName: p.photoName || '',
       }))
     };
 
     try {
-      const res = await fetch(GOOGLE_SCRIPT_URL, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify(payload)
-      });
+      const res = await fetch(GOOGLE_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), mode:'cors' });
       const text = await res.text();
-      if (!res.ok) {
-        console.error('submit error', res.status, text);
-        setMsg('error', `Submission failed: server ${res.status}. See console.`); setLoading(false); return;
-      }
+      if (!res.ok) { console.error('submit bad', res.status, text); setMsg('error', `Submit failed: ${res.status}.`); setLoading(false); return; }
       let data;
       try { data = JSON.parse(text); } catch(err) { console.error('json parse', text); setMsg('error','Invalid JSON response from server.'); setLoading(false); return; }
       setMsg('success', data.message || 'Submitted successfully.');
       setParticipants([]);
-    } catch (err) {
-      console.error('submit catch', err);
+    } catch(err) {
+      console.error('submit error', err);
       setMsg('error', 'Submission failed: ' + (err.message || 'network error'));
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   }
 
-  // Admin: fetch all and compute team counts
   async function fetchAllRegistrations() {
     setLoadingData(true);
     try {
       const data = await fetchAllRaw();
       setAllData(data);
-      // compute counts by teamNumber
       const counts = {};
       data.forEach(r => {
         const tnum = String(r.teamNumber || r.team || '').replace(/\D/g,'') || String(r.teamNumber || r.team || '');
@@ -243,7 +266,7 @@ export default function RegistrationPortal() {
       });
       setTeamCounts(counts);
       setMsg('success', 'Fetched data and computed team counts.');
-    } catch (err) {
+    } catch(err) {
       console.error('fetchAll error', err);
       setMsg('error', 'Fetch failed: ' + err.message);
     } finally { setLoadingData(false); }
@@ -256,20 +279,33 @@ export default function RegistrationPortal() {
     if (adminIdx !== -1) { setIsLoggedIn(true); setIsAdmin(true); setAdminUser(ADMIN_CREDENTIALS[adminIdx].username); setLoggedTeam(null); setMsg('success','Logged in as admin'); return; }
     const teamIdx = TEAM_CREDENTIALS.findIndex(c => c.username === username && c.password === password);
     if (teamIdx === -1) { setMsg('error','Invalid username/password'); return; }
-    setIsLoggedIn(true); setIsAdmin(false); setLoggedTeam(teamIdx + 1); setTeam(teamIdx + 1); setMsg('success', `Logged in as ${username} (Team ${teamIdx+1})`);
+    setIsLoggedIn(true); setIsAdmin(false); setLoggedTeam(teamIdx+1); setTeam(teamIdx+1); setMsg('success', `Logged in as ${username} (Team ${teamIdx+1})`);
   }
 
   function logout() { setIsLoggedIn(false); setIsAdmin(false); setLoggedTeam(null); setUsername(''); setPassword(''); setParticipants([]); setMsg('info','Logged out'); }
 
-  // Render
+  // small CSV helpers for admin export
+  function convertToCSV(data) {
+    if (!data || data.length === 0) return '';
+    const header = Object.keys(data[0]);
+    const rows = data.map(r => header.map(h => `"${String(r[h]||'').replace(/"/g,'""')}"`).join(','));
+    return [header.join(','), ...rows].join('\n');
+  }
+  function downloadCSV(csv, filename) {
+    const blob = new Blob([csv], { type:'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+  }
+
+  // UI render (kept simple)
   return (
     <div style={{ padding:20, fontFamily:'Arial, sans-serif' }}>
       <h1>Chamba Sports Meet — Registration Portal</h1>
 
       {!isLoggedIn ? (
         <form onSubmit={handleLogin} style={{ marginBottom:12 }}>
-          <input placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} /> {' '}
-          <input placeholder="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} /> {' '}
+          <input placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} />{' '}
+          <input placeholder="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} />{' '}
           <button type="submit">Login</button>
         </form>
       ) : (
@@ -288,9 +324,9 @@ export default function RegistrationPortal() {
               </select>
             </label>
             <label style={{ marginLeft:10 }}>Slots to add:
-              <input type="number" min="1" max="80" value={slotsToCreate} onChange={e=>setSlotsToCreate(Number(e.target.value))} style={{ width:70 }} />
+              <input type="number" min="1" max={MAX_PARTICIPANTS_PER_TEAM} value={slotsToCreate} onChange={e=>setSlotsToCreate(Number(e.target.value))} style={{ width:70 }} />
             </label>
-            <button onClick={()=>createSlots(slotsToCreate)} style={{ marginLeft:10 }}>Create slots (up to team max 80)</button>
+            <button onClick={()=>createSlots(slotsToCreate)} style={{ marginLeft:10 }}>Create slots</button>
           </div>
 
           <form onSubmit={submitAll}>
@@ -302,10 +338,7 @@ export default function RegistrationPortal() {
                 <div style={{ display:'flex', gap:8, marginTop:6 }}>
                   <input placeholder="Full name" value={p.name} onChange={e=>updateParticipant(i,'name',e.target.value)} />
                   <select value={p.gender} onChange={e=>updateParticipant(i,'gender',e.target.value)}>
-                    <option value="">Gender</option>
-                    <option>Male</option>
-                    <option>Female</option>
-                    <option>Other</option>
+                    <option value="">Gender</option><option>Male</option><option>Female</option><option>Other</option>
                   </select>
                   <input placeholder="Age" value={p.age} onChange={e=>updateParticipant(i,'age',e.target.value)} style={{ width:80 }} />
                   <select value={p.designation} onChange={e=>updateParticipant(i,'designation',e.target.value)}>
@@ -323,8 +356,7 @@ export default function RegistrationPortal() {
                   <label style={{ marginLeft:8 }}>
                     Diet:
                     <select value={p.diet || 'Veg'} onChange={e=>updateParticipant(i,'diet',e.target.value)}>
-                      <option>Veg</option>
-                      <option>Non-Veg</option>
+                      <option>Veg</option><option>Non-Veg</option>
                     </select>
                   </label>
                 </div>
@@ -348,9 +380,7 @@ export default function RegistrationPortal() {
               </div>
             ))}
 
-            <div>
-              <button type="submit" disabled={loading}>{loading ? 'Submitting...' : `Submit all ${participants.length} participants`}</button>
-            </div>
+            <div><button type="submit" disabled={loading}>{loading ? 'Submitting...' : `Submit all (${participants.length})`}</button></div>
           </form>
         </>
       )}
@@ -359,7 +389,7 @@ export default function RegistrationPortal() {
         <div>
           <h3>Admin Dashboard</h3>
           <div style={{ display:'flex', gap:8 }}>
-            <button onClick={fetchAllRegistrations}>Fetch all registrations + compute counts</button>
+            <button onClick={fetchAllRegistrations}>Fetch all registrations</button>
             <button onClick={()=>{ if (allData && allData.length>0) { const csv = convertToCSV(allData); downloadCSV(csv, 'all_registrations.csv'); } }}>Download CSV</button>
           </div>
 
@@ -371,46 +401,3 @@ export default function RegistrationPortal() {
               <table style={{ borderCollapse:'collapse', width:400 }}>
                 <thead><tr><th style={{ border:'1px solid #ddd', padding:6 }}>Team</th><th style={{ border:'1px solid #ddd', padding:6 }}>Count</th></tr></thead>
                 <tbody>
-                  {Object.keys(teamCounts).sort((a,b)=>Number(a)-Number(b)).map(k => (
-                    <tr key={k}><td style={{ border:'1px solid #eee', padding:6 }}>{k}</td><td style={{ border:'1px solid #eee', padding:6 }}>{teamCounts[k]}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {allData && allData.length > 0 && (
-            <div style={{ marginTop:12, maxHeight:300, overflow:'auto' }}>
-              <table style={{ width:'100%', borderCollapse:'collapse' }}>
-                <thead><tr>{Object.keys(allData[0]).map(h => <th key={h} style={{ border:'1px solid #ddd', padding:6 }}>{h}</th>)}</tr></thead>
-                <tbody>
-                  {allData.map((row, idx) => (
-                    <tr key={idx}>
-                      {Object.keys(allData[0]).map(k => <td key={k} style={{ border:'1px solid #eee', padding:6 }}>{String(row[k]||'')}</td>)}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {message && <div style={{ marginTop:12, padding:8, borderRadius:6, background: message.type==='error' ? '#fee2e2' : message.type==='info' ? '#eef2ff' : '#ecfccb' }}>{message.text}</div>}
-    </div>
-  );
-}
-
-// small helpers for admin CSV export
-function convertToCSV(data) {
-  if (!data || data.length === 0) return '';
-  const header = Object.keys(data[0]);
-  const rows = data.map(r => header.map(h => `"${String(r[h]||'').replace(/"/g,'""')}"`).join(','));
-  return [header.join(','), ...rows].join('\n');
-}
-function downloadCSV(csv, filename) {
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
-}
