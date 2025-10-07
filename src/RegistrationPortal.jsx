@@ -1,14 +1,13 @@
+/* RegistrationPortal.jsx — updated for your requested features
+   Copy this into src/RegistrationPortal.jsx (replace the previous component).
+   It expects a runtime env: GOOGLE_SCRIPT_URL (Vite: import.meta.env.VITE_GOOGLE_SCRIPT_URL
+   or runtime window.__ENV setting). */
+
 import React, { useState } from 'react';
 
-/*
-  RegistrationPortal.jsx
-  Paste this file into src/RegistrationPortal.jsx
-  IMPORTANT: Set VITE_GOOGLE_SCRIPT_URL in .env (local) and in Vercel env vars for production.
-*/
-
 const TEAM_COUNT = 13;
-const MAX_PARTICIPANTS_PER_TEAM = 50;
-
+const MAX_PARTICIPANTS_PER_TEAM = 80; // new team max
+const MAX_SPORTS_PER_PARTICIPANT = 3; // uniform for all
 const SPORTS = [
   '100 m','200 m','400 m','800 m','1500 m','5000 m','4x100 m relay',
   'Long Jump','High Jump','Triple Jump','Discuss Throw','Shotput','Javelin throw',
@@ -19,29 +18,40 @@ const SPORTS = [
   'Volleyball (Men)','Kabaddi (Men)','Basketball (Men)','Tug of War','Football','Lawn Tennis','Quiz'
 ];
 
-// demo credentials (replace with proper auth for production)
-const TEAM_CREDENTIALS = Array.from({ length: TEAM_COUNT }, (_, i) => ({ username: `manager_team${i + 1}`, password: `Cham@Team${i + 1}` }));
+const DESIGNATIONS = [
+  'CCF and above',
+  'CF',
+  'DCF/DFO',
+  'RFO',
+  'Block Officer/Forest Guard',
+  'Ministerial Staff',
+  'Others'
+];
+
+const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+
+const TEAM_CREDENTIALS = Array.from({ length: TEAM_COUNT }, (_, i) => ({ username: `manager_team${i+1}`, password: `Cham@Team${i+1}` }));
 const ADMIN_CREDENTIALS = [
   { username: 'admin1', password: 'Chamba@Admin1' },
   { username: 'admin2', password: 'Chamba@Admin2' },
-  { username: 'admin3', password: 'Chamba@Admin3' },
+  { username: 'admin3', password: 'Chamba@Admin3' }
 ];
 
-// read Apps Script URL from env (Vite uses import.meta.env)
-const GOOGLE_SCRIPT_URL = import.meta.env.VITE_GOOGLE_SCRIPT_URL || 'https://script.google.com/macros/s/AKfycbzTAhyGLmIeag2eOp2OfMP56meU4Y1OBo0ZHOptdEMvAOIk0xrdMZsjoXXDO83M4UARNw/exec';
-const SAMPLE_SHEET_ID = import.meta.env.VITE_SAMPLE_SHEET_ID || '10L_ji8OziXIVSZ1ud8JZomL72NeuVpyRh06Qx1oicWM';
+const GOOGLE_SCRIPT_URL = (typeof window !== 'undefined' && (window.__ENV && window.__ENV.VITE_GOOGLE_SCRIPT_URL)) ? window.__ENV.VITE_GOOGLE_SCRIPT_URL
+  : (typeof import !== 'undefined' && import.meta && import.meta.env && import.meta.env.VITE_GOOGLE_SCRIPT_URL) ? import.meta.env.VITE_GOOGLE_SCRIPT_URL
+  : '/api/proxy'; // fallback to proxy relative path
 
-function getCategory(gender, age) {
+function computeAgeClass(gender, age) {
   const g = (gender || '').toLowerCase();
   const a = Number(age) || 0;
   if (g === 'male') {
-    if (a > 52) return 'Senior Veteran';
-    if (a > 45) return 'Veteran';
-    return 'Open';
+    if (a >= 53) return 'Men Senior Veteran';
+    if (a >= 45) return 'Men Veteran';
+    return 'Men Open';
   }
   if (g === 'female') {
-    if (a > 40) return 'Veteran';
-    return 'Open';
+    if (a >= 40) return 'Women Veteran';
+    return 'Women Open';
   }
   return 'Open';
 }
@@ -49,486 +59,358 @@ function getCategory(gender, age) {
 export default function RegistrationPortal() {
   const [team, setTeam] = useState(1);
   const [participants, setParticipants] = useState([]);
-  const [slotsToCreate, setSlotsToCreate] = useState(13);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState(null);
-
+  const [slotsToCreate, setSlotsToCreate] = useState(10);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loggedTeam, setLoggedTeam] = useState(null);
   const [adminUser, setAdminUser] = useState(null);
-
+  const [message, setMessage] = useState(null);
+  const [loading, setLoading] = useState(false);
   const [allData, setAllData] = useState(null);
   const [loadingData, setLoadingData] = useState(false);
+  const [teamCounts, setTeamCounts] = useState(null);
 
-  function createSlots(n) {
-    if (!isLoggedIn || isAdmin) {
-      setMessage({ type: 'error', text: 'Only logged-in team managers (not admins) can create participant slots. Please log in as a manager.' });
-      return;
+  function setMsg(type, text) { setMessage({ type, text }); setTimeout(()=>setMessage(null), 8000); }
+
+  // helper - fetch all rows (for counts / admin)
+  async function fetchAllRaw() {
+    const res = await fetch(`${GOOGLE_SCRIPT_URL}?action=export`, { method: 'GET', mode: 'cors' });
+    const txt = await res.text();
+    if (!res.ok) throw new Error(`Export failed ${res.status}: ${txt}`);
+    try { return JSON.parse(txt); } catch(e) { throw new Error('Invalid JSON from export'); }
+  }
+
+  // get current team count
+  async function getTeamCount(tnum) {
+    // Use export and count rows, or apps script action=count (if implemented)
+    try {
+      const data = await fetchAllRaw();
+      const cnt = data.filter(r => String(r.teamNumber || r.team || '').includes(String(tnum))).length;
+      return cnt;
+    } catch (err) {
+      console.error('getTeamCount error', err);
+      throw err;
     }
-    if (loggedTeam !== team) {
-      setMessage({ type: 'error', text: `You are logged in as Team ${loggedTeam}. Switch to Team ${team} to create slots.` });
-      return;
+  }
+
+  // Create slots after checking team limit
+  async function createSlots(n) {
+    if (!isLoggedIn || isAdmin) { setMsg('error','Only logged-in team managers can create slots.'); return; }
+    if (loggedTeam !== team) { setMsg('error', `You are logged in as Team ${loggedTeam}. Switch to Team ${team} to add slots.`); return; }
+
+    const want = Math.max(0, Math.min(Number(n) || 0, MAX_PARTICIPANTS_PER_TEAM));
+    try {
+      const current = await getTeamCount(team);
+      if (current + want > MAX_PARTICIPANTS_PER_TEAM) {
+        setMsg('error', `Cannot add ${want} slots. Team already has ${current} players. Max allowed per team is ${MAX_PARTICIPANTS_PER_TEAM}.`);
+        return;
+      }
+      const slots = Array.from({ length: want }, () => ({
+        name:'', gender:'', age:'', designation:'', phone:'', sports: Array.from({length: MAX_SPORTS_PER_PARTICIPANT}).map(()=>''), diet:'Veg', bloodType:'', ageClass:'', photoFile: null, photoBase64:'', photoName:''
+      }));
+      setParticipants(prev => [...prev, ...slots]);
+      setMsg('info', `Created ${want} slots. Team now can submit these players.`);
+
+    } catch (err) {
+      setMsg('error', 'Unable to check team count: ' + err.message);
     }
-    const count = Math.max(0, Math.min(Number(n) || 0, MAX_PARTICIPANTS_PER_TEAM));
-    const slots = Array.from({ length: count }, () => ({ name: '', gender: '', age: '', designation: '', phone: '', sports: ['', '', '', '', ''] }));
-    setParticipants(slots);
-    setMessage({ type: 'info', text: `Created ${count} participant slots for Team ${team}.` });
   }
 
   function updateParticipant(i, field, value) {
-    setParticipants((prev) => prev.map((row, idx) => (idx === i ? { ...row, [field]: value } : row)));
+    setParticipants(prev => prev.map((r, idx) => idx===i ? { ...r, [field]: value } : r));
   }
 
-  function updateParticipantSport(i, sportIndex, value) {
-    setParticipants((prev) =>
-      prev.map((row, idx) => {
-        if (idx !== i) return row;
-        const sports = Array.isArray(row.sports) ? [...row.sports] : ['', '', '', '', ''];
-        sports[sportIndex] = value;
-        return { ...row, sports };
-      })
-    );
+  function updateSport(i, si, value) {
+    setParticipants(prev => prev.map((r, idx) => {
+      if (idx !== i) return r;
+      const sports = Array.isArray(r.sports) ? [...r.sports] : Array.from({length:MAX_SPORTS_PER_PARTICIPANT}).map(()=>'');
+      sports[si] = value;
+      return { ...r, sports };
+    }));
   }
 
-  function validate() {
-    if (!isLoggedIn) { setMessage({ type: 'error', text: 'Only logged-in team managers can submit participants.' }); return false; }
-    if (isAdmin) { setMessage({ type: 'error', text: 'Admins cannot submit team participants. Log in as a manager.' }); return false; }
-    if (loggedTeam !== team) { setMessage({ type: 'error', text: `You are logged in as manager for Team ${loggedTeam}. Switch to Team ${team} to submit.` }); return false; }
-    if (!participants || participants.length === 0) { setMessage({ type: 'error', text: 'No participant slots created.' }); return false; }
-
-    const counts = {
-      'Badminton (Singles)': 0, 'Badminton (Doubles)': 0, 'Badminton (Mixed Doubles)': 0,
-      'Table Tennis (Singles)': 0, 'Table Tennis (Doubles)': 0, 'Table Tennis (Mixed Doubles)': 0,
-      'Chess': { male: 0, female: 0 }, 'Carrom (Singles)': { male: 0, female: 0 },
+  // handle file input -> convert to base64
+  function handlePhotoFile(i, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const base64 = ev.target.result.split(',')[1]; // remove data:...;base64,
+      setParticipants(prev => prev.map((r, idx) => idx===i ? { ...r, photoFile: file, photoBase64: base64, photoName: file.name } : r));
     };
+    reader.readAsDataURL(file);
+  }
 
-    for (let i = 0; i < participants.length; i++) {
-      const p = participants[i] || {};
-      if (!p.name || !p.name.trim()) { setMessage({ type: 'error', text: `Participant ${i + 1}: name required.` }); return false; }
-      if (!p.age || isNaN(Number(p.age)) || Number(p.age) <= 0) { setMessage({ type: 'error', text: `Participant ${i + 1}: enter a valid age.` }); return false; }
-      if (!p.phone || !p.phone.trim()) { setMessage({ type: 'error', text: `Participant ${i + 1}: phone required.` }); return false; }
-      if (!/^[0-9]{6,15}$/.test(p.phone.trim())) { setMessage({ type: 'error', text: `Participant ${i + 1}: enter a valid phone number (6-15 digits).` }); return false; }
-
-      const gender = (p.gender || '').toLowerCase();
-      const age = Number(p.age);
-      p._category = getCategory(gender, age);
-
-      const maxDropdowns = gender === 'female' ? 5 : 3;
-      const sel = (Array.isArray(p.sports) ? p.sports.slice(0, maxDropdowns) : []).filter(Boolean);
-
-      const uniqueSel = Array.from(new Set(sel));
-      if (uniqueSel.length !== sel.length) { setMessage({ type: 'error', text: `Participant ${i + 1}: duplicate sports selected.` }); return false; }
-      if (sel.length > maxDropdowns) { setMessage({ type: 'error', text: `Participant ${i + 1}: max ${maxDropdowns} sports allowed.` }); return false; }
-
-      sel.forEach((s) => {
-        if (s === 'Badminton (Singles)') counts['Badminton (Singles)']++;
-        if (s === 'Badminton (Doubles)') counts['Badminton (Doubles)']++;
-        if (s === 'Badminton (Mixed Doubles)') counts['Badminton (Mixed Doubles)']++;
-        if (s === 'Table Tennis (Singles)') counts['Table Tennis (Singles)']++;
-        if (s === 'Table Tennis (Doubles)') counts['Table Tennis (Doubles)']++;
-        if (s === 'Table Tennis (Mixed Doubles)') counts['Table Tennis (Mixed Doubles)']++;
-        if (s === 'Chess') { if (gender === 'female') counts['Chess'].female++; else counts['Chess'].male++; }
-        if (s === 'Carrom (Singles)') { if (gender === 'female') counts['Carrom (Singles)'].female++; else counts['Carrom (Singles)'].male++; }
-      });
+  // Basic validation
+  function validateAll() {
+    if (!isLoggedIn || isAdmin) { setMsg('error','Only logged-in managers can submit.'); return false; }
+    if (loggedTeam !== team) { setMsg('error', `You are manager for Team ${loggedTeam}. Switch to Team ${team}.`); return false; }
+    if (!participants || participants.length === 0) { setMsg('error','No participant slots created.'); return false; }
+    for (let i=0;i<participants.length;i++){
+      const p = participants[i];
+      if (!p.name || !p.name.trim()) { setMsg('error', `Participant ${i+1}: name required.`); return false; }
+      if (!p.age || isNaN(Number(p.age)) || Number(p.age)<=0) { setMsg('error', `Participant ${i+1}: valid age required.`); return false; }
+      if (!p.phone || !/^[0-9]{6,15}$/.test((p.phone||'').trim())) { setMsg('error', `Participant ${i+1}: enter valid phone.`); return false; }
+      const sel = (Array.isArray(p.sports)? p.sports.filter(Boolean).slice(0,MAX_SPORTS_PER_PARTICIPANT) : []);
+      if (sel.length === 0) { setMsg('error', `Participant ${i+1}: select at least 1 sport.`); return false; }
+      if (sel.length > MAX_SPORTS_PER_PARTICIPANT) { setMsg('error', `Participant ${i+1}: max ${MAX_SPORTS_PER_PARTICIPANT} sports allowed.`); return false; }
+      const uniq = Array.from(new Set(sel));
+      if (uniq.length !== sel.length) { setMsg('error', `Participant ${i+1}: duplicate sports selected.`); return false; }
+      if (!p.bloodType || !BLOOD_TYPES.includes(p.bloodType)) { setMsg('error', `Participant ${i+1}: select blood type.`); return false; }
+      if (!p.designation || !DESIGNATIONS.includes(p.designation)) { setMsg('error', `Participant ${i+1}: select designation.`); return false; }
+      // compute age class
+      p.ageClass = computeAgeClass(p.gender, p.age);
     }
-
-    if (counts['Badminton (Singles)'] > 2) { setMessage({ type: 'error', text: 'Badminton: max 2 singles players per team.' }); return false; }
-    if (counts['Table Tennis (Singles)'] > 2) { setMessage({ type: 'error', text: 'Table Tennis: max 2 singles players per team.' }); return false; }
-
-    const checkDoubles = (label, requireMixed) => {
-      const c = counts[label];
-      if (c === 0) return true;
-      if (c !== 2) { setMessage({ type: 'error', text: `${label}: if selected, exactly 2 participants must be entered. Currently ${c} found.` }); return false; }
-      if (requireMixed) {
-        const genders = participants.filter((p) => (p.sports || []).includes(label)).map((p) => (p.gender || '').toLowerCase());
-        const maleCount = genders.filter((g) => g === 'male').length;
-        const femaleCount = genders.filter((g) => g === 'female').length;
-        if (!(maleCount === 1 && femaleCount === 1)) { setMessage({ type: 'error', text: `${label}: mixed doubles require one male and one female.` }); return false; }
-      }
-      return true;
-    };
-
-    if (!checkDoubles('Badminton (Doubles)', false)) return false;
-    if (!checkDoubles('Badminton (Mixed Doubles)', true)) return false;
-    if (!checkDoubles('Table Tennis (Doubles)', false)) return false;
-    if (!checkDoubles('Table Tennis (Mixed Doubles)', true)) return false;
-
-    if (counts['Chess'].male > 1 || counts['Chess'].female > 1) { setMessage({ type: 'error', text: 'Chess: only one player per gender allowed per team.' }); return false; }
-    if (counts['Carrom (Singles)'].male > 1 || counts['Carrom (Singles)'].female > 1) { setMessage({ type: 'error', text: 'Carrom (Singles): only one player per gender allowed per team.' }); return false; }
-
     return true;
   }
 
-  async function submitWithDiagnostics(e) {
-    e.preventDefault();
+  async function submitAll(e) {
+    if (e && e.preventDefault) e.preventDefault();
     setMessage(null);
-    if (!validate()) return;
+    if (!validateAll()) return;
     setLoading(true);
+
+    // check team count again (to avoid race)
+    try {
+      const current = await getTeamCount(team);
+      if (current + participants.length > MAX_PARTICIPANTS_PER_TEAM) {
+        setMsg('error', `Submitting ${participants.length} would exceed team limit. Team currently has ${current} players. Max ${MAX_PARTICIPANTS_PER_TEAM}.`);
+        setLoading(false);
+        return;
+      }
+    } catch (err) {
+      setMsg('error', 'Unable to verify current team count before submit: ' + err.message);
+      setLoading(false);
+      return;
+    }
 
     const payload = {
       team: `Team ${team}`,
       teamNumber: team,
       manager: username,
       timestamp: new Date().toISOString(),
-      participants,
+      participants: participants.map(p => ({
+        name: p.name,
+        gender: p.gender,
+        age: p.age,
+        ageClass: computeAgeClass(p.gender, p.age),
+        designation: p.designation,
+        phone: p.phone,
+        sports: (Array.isArray(p.sports) ? p.sports.filter(Boolean).slice(0,MAX_SPORTS_PER_PARTICIPANT) : []),
+        diet: p.diet || 'Veg',
+        bloodType: p.bloodType || '',
+        photoBase64: p.photoBase64 || '', // base64 string (no data: prefix)
+        photoName: p.photoName || '',
+      }))
     };
 
     try {
       const res = await fetch(GOOGLE_SCRIPT_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        mode: 'cors',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
       });
-
       const text = await res.text();
       if (!res.ok) {
-        console.error('submitWithDiagnostics bad status', res.status, text);
-        setMessage({ type: 'error', text: `Submission failed: server returned ${res.status}. Check DevTools/network.` });
-        setLoading(false);
-        return;
+        console.error('submit error', res.status, text);
+        setMsg('error', `Submission failed: server ${res.status}. See console.`); setLoading(false); return;
       }
-
       let data;
-      try { data = JSON.parse(text); } catch (err) {
-        console.error('submitWithDiagnostics JSON parse error — body:', text);
-        setMessage({ type: 'error', text: 'Submission failed: server returned invalid JSON. Check DevTools/network.' });
-        setLoading(false);
-        return;
-      }
-
-      setMessage({ type: 'success', text: data.message || 'Registration submitted successfully.' });
+      try { data = JSON.parse(text); } catch(err) { console.error('json parse', text); setMsg('error','Invalid JSON response from server.'); setLoading(false); return; }
+      setMsg('success', data.message || 'Submitted successfully.');
       setParticipants([]);
     } catch (err) {
-      console.error('submitWithDiagnostics error', err);
-      if (err && err.message && err.message.includes('Failed to fetch')) {
-        setMessage({ type: 'error', text: 'Submission failed: network/CORS error (Failed to fetch). Ensure Apps Script is deployed and accessible.' });
-      } else {
-        setMessage({ type: 'error', text: `Submission failed: ${err.message}` });
-      }
+      console.error('submit catch', err);
+      setMsg('error', 'Submission failed: ' + (err.message || 'network error'));
     } finally {
       setLoading(false);
     }
   }
 
-  async function fetchAllDataDebug() {
+  // Admin: fetch all and compute team counts
+  async function fetchAllRegistrations() {
     setLoadingData(true);
-    setMessage(null);
     try {
-      const res = await fetch(GOOGLE_SCRIPT_URL + '?action=export', { method: 'GET', mode: 'cors' });
-      const text = await res.text();
-      if (!res.ok) {
-        console.error('fetchAllDataDebug bad status', res.status, text);
-        setMessage({ type: 'error', text: `Failed to fetch data: server returned ${res.status}. Check DevTools/network.` });
-        setLoadingData(false);
-        return;
-      }
-      let data;
-      try { data = JSON.parse(text); } catch (err) {
-        console.error('fetchAllDataDebug JSON parse error — body:', text);
-        setMessage({ type: 'error', text: 'Failed to fetch data: server returned invalid JSON. Check Apps Script response.' });
-        setLoadingData(false);
-        return;
-      }
+      const data = await fetchAllRaw();
       setAllData(data);
-      setMessage({ type: 'success', text: 'Fetched all registration data.' });
+      // compute counts by teamNumber
+      const counts = {};
+      data.forEach(r => {
+        const tnum = String(r.teamNumber || r.team || '').replace(/\D/g,'') || String(r.teamNumber || r.team || '');
+        const key = tnum || (r.team || 'Unknown');
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      setTeamCounts(counts);
+      setMsg('success', 'Fetched data and computed team counts.');
     } catch (err) {
-      console.error('fetchAllDataDebug error', err);
-      if (err && err.message && err.message.includes('Failed to fetch')) {
-        setMessage({ type: 'error', text: 'Failed to fetch data: network/CORS error (Failed to fetch). Ensure Apps Script web app is deployed and accessible.' });
-      } else {
-        setMessage({ type: 'error', text: `Failed to fetch data: ${err.message}` });
-      }
-    } finally {
-      setLoadingData(false);
-    }
-  }
-
-  function downloadAllCSV() {
-    if (!allData || !Array.isArray(allData) || allData.length === 0) return;
-    const header = Object.keys(allData[0]);
-    const NEWLINE = String.fromCharCode(10);
-    const csvRows = allData.map((r) => header.map((h) => '"' + ((r[h] || '').toString().replace(/"/g, '""')) + '"').join(','));
-    const csv = [header.join(','), ...csvRows].join(NEWLINE);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `all_registrations.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+      console.error('fetchAll error', err);
+      setMsg('error', 'Fetch failed: ' + err.message);
+    } finally { setLoadingData(false); }
   }
 
   function handleLogin(e) {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     setMessage(null);
-
-    const adminIdx = ADMIN_CREDENTIALS.findIndex((cred) => cred.username === username && cred.password === password);
-    if (adminIdx !== -1) {
-      setIsLoggedIn(true);
-      setIsAdmin(true);
-      setAdminUser(ADMIN_CREDENTIALS[adminIdx].username);
-      setLoggedTeam(null);
-      setMessage({ type: 'success', text: `Logged in as admin: ${ADMIN_CREDENTIALS[adminIdx].username}` });
-      return;
-    }
-
-    const teamIndex = TEAM_CREDENTIALS.findIndex((cred) => cred.username === username && cred.password === password);
-    if (teamIndex === -1) { setMessage({ type: 'error', text: 'Invalid username or password.' }); return; }
-
-    setIsLoggedIn(true);
-    setIsAdmin(false);
-    setLoggedTeam(teamIndex + 1);
-    setTeam(teamIndex + 1);
-    setAdminUser(null);
-    setMessage({ type: 'success', text: `Logged in as ${username} (Team ${teamIndex + 1}).` });
+    const adminIdx = ADMIN_CREDENTIALS.findIndex(c => c.username === username && c.password === password);
+    if (adminIdx !== -1) { setIsLoggedIn(true); setIsAdmin(true); setAdminUser(ADMIN_CREDENTIALS[adminIdx].username); setLoggedTeam(null); setMsg('success','Logged in as admin'); return; }
+    const teamIdx = TEAM_CREDENTIALS.findIndex(c => c.username === username && c.password === password);
+    if (teamIdx === -1) { setMsg('error','Invalid username/password'); return; }
+    setIsLoggedIn(true); setIsAdmin(false); setLoggedTeam(teamIdx + 1); setTeam(teamIdx + 1); setMsg('success', `Logged in as ${username} (Team ${teamIdx+1})`);
   }
 
-  function handleLogout() {
-    setIsLoggedIn(false); setIsAdmin(false); setLoggedTeam(null); setUsername(''); setPassword(''); setParticipants([]); setMessage({ type: 'info', text: 'Logged out.' });
-  }
+  function logout() { setIsLoggedIn(false); setIsAdmin(false); setLoggedTeam(null); setUsername(''); setPassword(''); setParticipants([]); setMsg('info','Logged out'); }
 
-  function exportTeamSlotsCSV() {
-    if (!participants || participants.length === 0) return;
-    if (!isLoggedIn || isAdmin || loggedTeam !== team) { setMessage({ type: 'error', text: 'Only the logged-in team manager can export this team CSV.' }); return; }
-    const rows = participants.map((p) => ({
-      team: `Team ${team}`,
-      name: p.name || '',
-      gender: p.gender || '',
-      age: p.age || '',
-      designation: p.designation || '',
-      phone: p.phone || '',
-      sports: (Array.isArray(p.sports) ? p.sports.filter(Boolean).join('; ') : ''),
-      category: getCategory(p.gender, p.age),
-    }));
-    const header = Object.keys(rows[0] || { team: '', name: '', gender: '', age: '', designation: '', phone: '', sports: '', category: '' });
-    const NEWLINE = String.fromCharCode(10);
-    const csvRows = rows.map((r) => header.map((h) => '"' + ((r[h] || '').toString().replace(/"/g, '""')) + '"').join(','));
-    const csv = [header.join(','), ...csvRows].join(NEWLINE);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `team-${team}-participants.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
+  // Render
   return (
-    <div className="min-h-screen bg-gradient-to-b from-green-50 to-white p-6">
-      <div className="max-w-6xl mx-auto bg-white shadow-lg rounded-2xl p-6">
-        <header className="mb-4">
-          <h1 className="text-2xl font-bold">Chamba Sports Meet — Manager & Admin Portal</h1>
-          <p className="text-sm text-gray-600">Managers (13) can log in to register participants for their teams. Admins (3) can view and download all registrations.</p>
-        </header>
+    <div style={{ padding:20, fontFamily:'Arial, sans-serif' }}>
+      <h1>Chamba Sports Meet — Registration Portal</h1>
 
-        <section className="mb-4 p-4 border rounded-lg">
-          {!isLoggedIn ? (
-            <form onSubmit={handleLogin} className="grid grid-cols-3 gap-3 items-end">
-              <label className="flex flex-col">
-                <span className="text-sm font-medium">Username</span>
-                <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="manager_team1 or admin1" className="mt-1 p-2 border rounded" />
-              </label>
+      {!isLoggedIn ? (
+        <form onSubmit={handleLogin} style={{ marginBottom:12 }}>
+          <input placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} /> {' '}
+          <input placeholder="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} /> {' '}
+          <button type="submit">Login</button>
+        </form>
+      ) : (
+        <div style={{ marginBottom:12 }}>
+          <div>Logged in as: {isAdmin ? adminUser : username} {isAdmin ? '(Admin)' : `(Team ${loggedTeam})`}</div>
+          <button onClick={logout}>Logout</button>
+        </div>
+      )}
 
-              <label className="flex flex-col">
-                <span className="text-sm font-medium">Password</span>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Cham@Team1 or Chamba@Admin1" className="mt-1 p-2 border rounded" />
-              </label>
+      {!isAdmin && isLoggedIn && (
+        <>
+          <div style={{ marginBottom:10 }}>
+            <label>Team:
+              <select value={team} onChange={e=>setTeam(Number(e.target.value))}>
+                {Array.from({length:TEAM_COUNT}).map((_,i)=> <option key={i} value={i+1}>{i+1}</option>)}
+              </select>
+            </label>
+            <label style={{ marginLeft:10 }}>Slots to add:
+              <input type="number" min="1" max="80" value={slotsToCreate} onChange={e=>setSlotsToCreate(Number(e.target.value))} style={{ width:70 }} />
+            </label>
+            <button onClick={()=>createSlots(slotsToCreate)} style={{ marginLeft:10 }}>Create slots (up to team max 80)</button>
+          </div>
 
-              <div className="col-span-3 flex gap-2">
-                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">Login</button>
-                <button type="button" onClick={() => { setUsername(''); setPassword(''); }} className="px-4 py-2 border rounded-lg">Clear</button>
-              </div>
-            </form>
-          ) : (
-            <div className="flex justify-between items-center">
-              <div>
-                <div className="font-medium">Logged in as: {isAdmin ? adminUser : username} {isAdmin ? '(Admin)' : `(Team ${loggedTeam})`}</div>
-                <div className="text-xs text-gray-600">{isAdmin ? 'Admin dashboard available below.' : 'Use the controls below to create slots and register participants for your team.'}</div>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={handleLogout} className="px-3 py-1 border rounded">Logout</button>
-                <button onClick={() => { setParticipants([]); setMessage(null); }} className="px-3 py-1 border rounded">Clear slots</button>
-              </div>
-            </div>
-          )}
-        </section>
+          <form onSubmit={submitAll}>
+            {participants.length === 0 && <div>No slots. Create slots to add participants.</div>}
 
-        {isAdmin && (
-          <section className="mb-6 p-4 border rounded-lg">
-            <h3 className="text-lg font-semibold mb-2">Admin Dashboard</h3>
-            <div className="flex gap-2 mb-4">
-              <button onClick={fetchAllDataDebug} className="px-4 py-2 bg-indigo-600 text-white rounded">Fetch all registrations</button>
-              <button onClick={downloadAllCSV} className="px-4 py-2 border rounded">Download CSV (all)</button>
-            </div>
+            {participants.map((p,i) => (
+              <div key={i} style={{ border:'1px solid #ccc', padding:10, marginBottom:10 }}>
+                <div><strong>Participant {i+1}</strong></div>
+                <div style={{ display:'flex', gap:8, marginTop:6 }}>
+                  <input placeholder="Full name" value={p.name} onChange={e=>updateParticipant(i,'name',e.target.value)} />
+                  <select value={p.gender} onChange={e=>updateParticipant(i,'gender',e.target.value)}>
+                    <option value="">Gender</option>
+                    <option>Male</option>
+                    <option>Female</option>
+                    <option>Other</option>
+                  </select>
+                  <input placeholder="Age" value={p.age} onChange={e=>updateParticipant(i,'age',e.target.value)} style={{ width:80 }} />
+                  <select value={p.designation} onChange={e=>updateParticipant(i,'designation',e.target.value)}>
+                    <option value="">Designation</option>
+                    {DESIGNATIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
 
-            {loadingData && <div className="text-sm text-gray-600">Loading data...</div>}
-
-            {allData && allData.length > 0 && (
-              <div className="overflow-auto max-h-96 border rounded">
-                <table className="min-w-full text-sm">
-                  <thead className="sticky top-0 bg-gray-50">
-                    <tr>
-                      {Object.keys(allData[0]).map((h) => (
-                        <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {allData.map((row, idx) => (
-                      <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                        {Object.keys(allData[0]).map((h) => (
-                          <td key={h} className="px-3 py-2 align-top">{(row[h] || '').toString()}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {allData && allData.length === 0 && <div className="text-sm text-gray-600">No registrations found.</div>}
-
-            <div className="mt-4 text-xs text-gray-600">
-              <strong>Apps Script export note:</strong> your Apps Script must implement `?action=export` and return JSON (see sample in Deployment section below).
-            </div>
-          </section>
-        )}
-
-        {/* Manager UI */}
-        {!isAdmin && isLoggedIn && (
-          <form onSubmit={submitWithDiagnostics}>
-            <div className="grid grid-cols-3 gap-4 mb-4 items-end">
-              <label className="flex flex-col">
-                <span className="font-medium">Number of participants to create</span>
-                <input type="number" min={1} max={MAX_PARTICIPANTS_PER_TEAM} value={slotsToCreate} onChange={(e) => setSlotsToCreate(Number(e.target.value))} className="mt-1 p-2 border rounded" />
-              </label>
-
-              <div className="flex gap-2">
-                <button type="button" onClick={() => createSlots(slotsToCreate)} className="px-4 py-2 bg-green-600 text-white rounded-lg">Create slots</button>
-                <button type="button" onClick={exportTeamSlotsCSV} className="px-4 py-2 border rounded-lg">Export CSV (current slots)</button>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              {participants.length === 0 && (
-                <div className="p-4 border rounded-lg text-sm text-gray-600">No participant slots yet. Use the control above to create slots for your team and then fill details. All participants will be submitted together.</div>
-              )}
-
-              {participants.map((p, i) => (
-                <div key={i} className="p-4 border rounded-lg">
-                  <h3 className="font-semibold mb-2">Participant {i + 1}</h3>
-                  <div className="grid grid-cols-4 gap-3">
-                    <input value={p.name} onChange={(e) => updateParticipant(i, 'name', e.target.value)} placeholder="Full name" className="p-2 border rounded" />
-                    <select value={p.gender} onChange={(e) => updateParticipant(i, 'gender', e.target.value)} className="p-2 border rounded">
-                      <option value="">Gender</option>
-                      <option>Male</option>
-                      <option>Female</option>
-                      <option>Other</option>
+                <div style={{ marginTop:8 }}>
+                  <input placeholder="Phone" value={p.phone} onChange={e=>updateParticipant(i,'phone',e.target.value)} />
+                  <select value={p.bloodType} onChange={e=>updateParticipant(i,'bloodType',e.target.value)} style={{ marginLeft:8 }}>
+                    <option value="">Blood Type</option>
+                    {BLOOD_TYPES.map(bt => <option key={bt} value={bt}>{bt}</option>)}
+                  </select>
+                  <label style={{ marginLeft:8 }}>
+                    Diet:
+                    <select value={p.diet || 'Veg'} onChange={e=>updateParticipant(i,'diet',e.target.value)}>
+                      <option>Veg</option>
+                      <option>Non-Veg</option>
                     </select>
-                    <input value={p.age} onChange={(e) => updateParticipant(i, 'age', e.target.value)} placeholder="Age" className="p-2 border rounded" />
-                    <input value={p.designation} onChange={(e) => updateParticipant(i, 'designation', e.target.value)} placeholder="Designation / Role" className="p-2 border rounded" />
-                  </div>
+                  </label>
+                </div>
 
-                  <div className="mt-3 grid grid-cols-1 gap-2">
-                    <input value={p.phone} onChange={(e) => updateParticipant(i, 'phone', e.target.value)} placeholder="Phone number" className="p-2 border rounded mb-2" />
-
-                    <div>
-                      <div className="text-sm font-medium mb-1">Choose sports (dropdowns) — females: up to 5, others: up to 3</div>
-                      <div className="grid grid-cols-5 gap-2">
-                        {Array.from({ length: (p.gender && p.gender.toLowerCase() === 'female') ? 5 : 3 }).map((_, si) => (
-                          <select key={si} value={(p.sports && p.sports[si]) || ''} onChange={(e) => updateParticipantSport(i, si, e.target.value)} className="p-2 border rounded">
-                            <option value="">Select sport {si + 1}</option>
-                            {SPORTS.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </select>
-                        ))}
-                      </div>
-                    </div>
+                <div style={{ marginTop:8 }}>
+                  <div>Choose up to {MAX_SPORTS_PER_PARTICIPANT} sports:</div>
+                  <div style={{ display:'flex', gap:8, marginTop:6 }}>
+                    {Array.from({length: MAX_SPORTS_PER_PARTICIPANT}).map((_, si) => (
+                      <select key={si} value={(p.sports && p.sports[si]) || ''} onChange={e=>updateSport(i, si, e.target.value)}>
+                        <option value="">Select</option>
+                        {SPORTS.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    ))}
                   </div>
                 </div>
-              ))}
-            </div>
 
-            <div className="mt-6 flex gap-3">
-              <button disabled={loading} type="submit" className="px-6 py-2 bg-blue-600 text-white rounded-lg">{loading ? 'Submitting...' : `Submit all ${participants.length} participants`}</button>
+                <div style={{ marginTop:8 }}>
+                  <label>Passport photo (jpg/png): <input type="file" accept="image/*" onChange={e=>handlePhotoFile(i, e.target.files[0])} /></label>
+                  {p.photoName && <span style={{ marginLeft:8 }}>{p.photoName}</span>}
+                </div>
+              </div>
+            ))}
+
+            <div>
+              <button type="submit" disabled={loading}>{loading ? 'Submitting...' : `Submit all ${participants.length} participants`}</button>
             </div>
           </form>
-        )}
+        </>
+      )}
 
-        {message && (
-          <div className={`mt-4 p-3 rounded ${message.type === 'error' ? 'bg-red-50 text-red-700' : message.type === 'info' ? 'bg-blue-50 text-blue-700' : 'bg-green-50 text-green-700'}`}>
-            {message.text}
+      {isAdmin && (
+        <div>
+          <h3>Admin Dashboard</h3>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={fetchAllRegistrations}>Fetch all registrations + compute counts</button>
+            <button onClick={()=>{ if (allData && allData.length>0) { const csv = convertToCSV(allData); downloadCSV(csv, 'all_registrations.csv'); } }}>Download CSV</button>
           </div>
-        )}
 
-        <section className="mt-6 text-sm text-gray-700">
-          <h4 className="font-semibold">Deployment & Google Sheets linking (instructions)</h4>
-          <ol className="list-decimal ml-5 mt-2 space-y-2">
-            <li>Create a Google Sheet with headers: <code>team,teamNumber,timestamp,manager,name,gender,age,designation,phone,sports,category</code>.</li>
-            <li>Open <strong>Extensions &gt; Apps Script</strong> in the sheet and paste the sample below. Deploy as Web App. Set <em>Who has access</em> to <strong>Anyone</strong> for simple testing.</li>
-          </ol>
+          {loadingData && <div>Loading...</div>}
 
-          <h4 className="font-semibold mt-4">Sample Apps Script (doPost + doGet?action=export)</h4>
-          <pre className="mt-2 p-2 bg-gray-100 rounded text-xs overflow-auto">{`function doPost(e) {
-  try {
-    var data = JSON.parse(e.postData.contents);
-    var ss = SpreadsheetApp.openById('${SAMPLE_SHEET_ID}'); // or SpreadsheetApp.getActive()
-    var sheet = ss.getSheetByName('Sheet1') || ss.getSheets()[0];
-    var rows = [];
-    data.participants.forEach(function(p){
-      var sports = (p.sports || []).filter(Boolean).join('; ');
-      var cat = '';
-      try { cat = getCategory(p.gender, Number(p.age)); } catch(e) { cat = ''; }
-      rows.push([data.team, data.teamNumber, data.timestamp, data.manager, p.name, p.gender, p.age, p.designation, p.phone, sports, cat]);
-    });
-    if (rows.length > 0) sheet.getRange(sheet.getLastRow()+1, 1, rows.length, rows[0].length).setValues(rows);
-    return ContentService.createTextOutput(JSON.stringify({status: 'success', message: 'OK'})).setMimeType(ContentService.MimeType.JSON);
-  } catch(err) {
-    return ContentService.createTextOutput(JSON.stringify({status: 'error', message: err.message})).setMimeType(ContentService.MimeType.JSON);
-  }
-}
+          {teamCounts && (
+            <div style={{ marginTop:12 }}>
+              <h4>Participants per team</h4>
+              <table style={{ borderCollapse:'collapse', width:400 }}>
+                <thead><tr><th style={{ border:'1px solid #ddd', padding:6 }}>Team</th><th style={{ border:'1px solid #ddd', padding:6 }}>Count</th></tr></thead>
+                <tbody>
+                  {Object.keys(teamCounts).sort((a,b)=>Number(a)-Number(b)).map(k => (
+                    <tr key={k}><td style={{ border:'1px solid #eee', padding:6 }}>{k}</td><td style={{ border:'1px solid #eee', padding:6 }}>{teamCounts[k]}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-function doGet(e) {
-  try {
-    if (e && e.parameter && e.parameter.action === 'export') {
-      var ss = SpreadsheetApp.openById('${SAMPLE_SHEET_ID}');
-      var sheet = ss.getSheetByName('Sheet1') || ss.getSheets()[0];
-      var rows = sheet.getDataRange().getValues();
-      var headers = rows.shift();
-      var result = rows.map(function(r){
-        var obj = {};
-        headers.forEach(function(h, i){ obj[h] = r[i]; });
-        return obj;
-      });
-      return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
-    }
-    return ContentService.createTextOutput(JSON.stringify({status: 'ok'})).setMimeType(ContentService.MimeType.JSON);
-  } catch(err) {
-    return ContentService.createTextOutput(JSON.stringify({status: 'error', message: err.message})).setMimeType(ContentService.MimeType.JSON);
-  }
-}
+          {allData && allData.length > 0 && (
+            <div style={{ marginTop:12, maxHeight:300, overflow:'auto' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                <thead><tr>{Object.keys(allData[0]).map(h => <th key={h} style={{ border:'1px solid #ddd', padding:6 }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {allData.map((row, idx) => (
+                    <tr key={idx}>
+                      {Object.keys(allData[0]).map(k => <td key={k} style={{ border:'1px solid #eee', padding:6 }}>{String(row[k]||'')}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
-function getCategory(gender, age) {
-  var g = (gender || '').toLowerCase();
-  var a = Number(age) || 0;
-  if (g === 'male') {
-    if (a > 52) return 'Senior Veteran';
-    if (a > 45) return 'Veteran';
-    return 'Open';
-  }
-  if (g === 'female') {
-    if (a > 40) return 'Veteran';
-    return 'Open';
-  }
-  return 'Open';
-}`}</pre>
-
-          <p className="mt-4 text-xs text-gray-500">Deploy the Apps Script as a Web App and paste the generated web app URL into the <code>VITE_GOOGLE_SCRIPT_URL</code> variable in your .env and in Vercel settings.</p>
-        </section>
-      </div>
+      {message && <div style={{ marginTop:12, padding:8, borderRadius:6, background: message.type==='error' ? '#fee2e2' : message.type==='info' ? '#eef2ff' : '#ecfccb' }}>{message.text}</div>}
     </div>
   );
+}
+
+// small helpers for admin CSV export
+function convertToCSV(data) {
+  if (!data || data.length === 0) return '';
+  const header = Object.keys(data[0]);
+  const rows = data.map(r => header.map(h => `"${String(r[h]||'').replace(/"/g,'""')}"`).join(','));
+  return [header.join(','), ...rows].join('\n');
+}
+function downloadCSV(csv, filename) {
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
 }
